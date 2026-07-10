@@ -1,17 +1,86 @@
 """
 computational_functions.py
 --------------------------
-General-purpose analytical building blocks for the Olist e-commerce dataset.
+Pure data layer — every function returns a DataFrame, Series, or dict.
+Nothing is printed or plotted here.
 
-Every function accepts a DataFrame plus explicit column-name parameters so the
-same function works regardless of how columns are named upstream.  Functions
-return plain DataFrames or dicts — nothing is printed or plotted here.
+RULE
+----
+  computation functions  →  produce data      (this file)
+  visualization functions →  consume data, produce Figures  (visualization_functions.py)
 
-Typical usage pattern
----------------------
-1. Join / filter your raw tables into a flat analysis DataFrame.
-2. Call the building-block function(s) you need, passing the column names.
-3. Pass the returned DataFrame / dict to the matching visualization function.
+Every function accepts explicit column-name parameters so the same function
+works regardless of how columns are named upstream.
+
+Typical usage
+-------------
+1. Join / filter raw tables into a flat analysis DataFrame.
+2. Call the relevant compute_*() function, passing column names.
+3. Pass the result directly to the matching plot_*() function.
+
+Question coverage
+-----------------
+Sec 1 – Executive Revenue
+  Q1   compute_kpis                               → plot_kpi_cards
+  Q2   compute_monthly_series · compute_growth_rate · compute_rolling_avg
+                                                  → plot_line / plot_combo
+  Q3   compute_monthly_revenue_rank               → plot_bar
+
+Sec 2 – Revenue Concentration
+  Q4   compute_concentration_stats · compute_pareto
+                                                  → plot_concentration_summary · plot_pareto
+  Q5   compute_revenue_share                      → plot_pareto · plot_bar
+  Q6   compute_pareto                             → plot_pareto
+
+Sec 3 – Customer Value
+  Q7   compute_revenue_share · compute_distribution_stats
+                                                  → plot_bar · plot_distribution
+  Q8   compute_distribution_stats                 → plot_distribution
+  Q9   compute_geographic_summary                 → plot_bar · plot_treemap
+
+Sec 4 – Product Performance
+  Q10  compute_product_performance                → plot_bar
+  Q11  compute_revenue_share                      → plot_bar · plot_treemap
+  Q12  compute_product_performance                → plot_scatter
+  Q13  compute_product_performance                → plot_scatter
+
+Sec 5 – Seller Performance
+  Q14  compute_revenue_share                      → plot_bar
+  Q15  aggregate_by                               → plot_scatter
+  Q16  compute_geographic_summary                 → plot_bar
+
+Sec 6 – Geographic Performance
+  Q17  compute_geographic_summary                 → plot_bar · plot_treemap
+  Q18  compute_geographic_summary                 → plot_bar
+  Q19  compute_freight_ratio                      → plot_bar
+
+Sec 7 – Delivery Performance
+  Q20  compute_delivery_metrics · compute_monthly_series
+                                                  → plot_line · plot_combo
+  Q21  compute_delivery_metrics                   → plot_bar
+  Q22  compute_delivery_metrics                   → plot_bar
+  Q23  compute_delivery_metrics                   → plot_kpi_cards
+
+Sec 8 – Customer Satisfaction
+  Q24  compute_correlation                        → plot_scatter
+  Q25  compute_rating_summary                     → plot_bar
+  Q26  compute_rating_summary                     → plot_bar
+  Q27  compute_rating_summary                     → plot_line · plot_combo
+
+Sec 9 – Payment Behavior
+  Q28  compute_payment_summary                    → plot_bar
+  Q29  compute_payment_summary                    → plot_scatter · plot_bar
+  Q30  compute_payment_summary                    → plot_bar
+
+Sec 10 – Operational Efficiency
+  Q31  compute_basket_size · compute_correlation  → plot_distribution · plot_scatter
+  Q32  compute_freight_ratio                      → plot_scatter
+  Q33  compute_freight_ratio                      → plot_kpi_cards
+
+Sec 11 – Strategic Investment
+  Q34  compute_composite_score                    → plot_quadrant
+  Q35  compute_composite_score                    → plot_quadrant
+  Q36  compute_market_opportunity                 → plot_quadrant
 """
 
 import pandas as pd
@@ -630,3 +699,195 @@ def compute_composite_score(df, index_col, metric_cols, weights):
     work["rank"] = range(1, len(work) + 1)
 
     return work
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 16. MONTHLY REVENUE RANK  (Q3 – seasonality)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_monthly_revenue_rank(df, period_col, revenue_col):
+    """
+    Add revenue rank and percentage contribution to a monthly revenue DataFrame.
+
+    Designed for Q3: Which months generated the highest / lowest revenue,
+    and what share of annual revenue did each contribute?
+
+    Parameters
+    ----------
+    df          : DataFrame — output of compute_monthly_series(), one row per month.
+    period_col  : str — column containing the period / month label.
+    revenue_col : str — monthly revenue column.
+
+    Returns
+    -------
+    DataFrame with: period_col, revenue_col, revenue_contribution_pct, rank.
+    Sorted by revenue descending (rank 1 = highest-revenue month).
+    """
+    work = df.copy()
+    total = work[revenue_col].sum()
+    work["revenue_contribution_pct"] = work[revenue_col] / total * 100
+    work = work.sort_values(revenue_col, ascending=False).reset_index(drop=True)
+    work["rank"] = range(1, len(work) + 1)
+    return work
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 17. PRODUCT PERFORMANCE  (Q10, Q12, Q13)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_product_performance(df, product_col, revenue_col, order_col, price_col=None):
+    """
+    Aggregate revenue, sales volume, and average price per product.
+
+    Designed for:
+      Q10 – highest-revenue products (sort by revenue).
+      Q12 – high-volume / low-revenue products: high units_sold, low avg_price.
+      Q13 – high-price / low-volume products: high avg_price, low units_sold.
+
+    Parameters
+    ----------
+    df          : DataFrame — one row per order-item.
+    product_col : str — product identifier column.
+    revenue_col : str — revenue column (price).
+    order_col   : str — order identifier column (used to count units sold).
+    price_col   : str | None — unit price column.  If None, revenue_col is used
+                  as the price proxy for avg_price.
+
+    Returns
+    -------
+    DataFrame with: product_col, revenue, units_sold, avg_price,
+                    revenue_share_pct, revenue_rank.
+    Sorted by revenue descending.
+    """
+    price_src = price_col if price_col else revenue_col
+
+    result = df.groupby(product_col, as_index=False).agg(
+        revenue=(revenue_col, "sum"),
+        units_sold=(order_col, "count"),
+        avg_price=(price_src, "mean"),
+    )
+    total = result["revenue"].sum()
+    result["revenue_share_pct"] = result["revenue"] / total * 100
+    result = result.sort_values("revenue", ascending=False).reset_index(drop=True)
+    result["revenue_rank"] = range(1, len(result) + 1)
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 18. GEOGRAPHIC SUMMARY  (Q9, Q16, Q17, Q18)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_geographic_summary(df, revenue_col, order_col,
+                                state_col=None, city_col=None,
+                                customer_col=None, seller_col=None):
+    """
+    Aggregate revenue, orders, customers, and sellers by geographic dimension.
+
+    Designed for:
+      Q9  – highest-value customers by state / city.
+      Q16 – highest-performing sellers by region.
+      Q17 – states with greatest total revenue.
+      Q18 – cities with highest average customer spending.
+
+    Parameters
+    ----------
+    df           : DataFrame — one row per order-item.
+    revenue_col  : str — revenue column.
+    order_col    : str — order identifier column.
+    state_col    : str | None — state column (e.g. customer_state).
+    city_col     : str | None — city column (e.g. customer_city).
+    customer_col : str | None — customer identifier column.
+    seller_col   : str | None — seller identifier column.
+
+    Returns
+    -------
+    dict with keys 'by_state' and / or 'by_city' (whichever cols were provided).
+    Each value is a DataFrame with: [geo_col], revenue, orders, avg_revenue_per_order,
+    and (if customer_col) customers, avg_revenue_per_customer,
+    and (if seller_col) sellers, revenue_per_seller.
+    Sorted by revenue descending.
+    """
+    result = {}
+
+    for geo_col, key in [(state_col, "by_state"), (city_col, "by_city")]:
+        if geo_col is None:
+            continue
+
+        agg_map = {
+            "revenue": (revenue_col, "sum"),
+            "orders":  (order_col, "nunique"),
+        }
+        if customer_col:
+            agg_map["customers"] = (customer_col, "nunique")
+        if seller_col:
+            agg_map["sellers"] = (seller_col, "nunique")
+
+        named_aggs = {k: pd.NamedAgg(column=v[0], aggfunc=v[1]) for k, v in agg_map.items()}
+        geo_df = df.groupby(geo_col, as_index=False).agg(**named_aggs)
+
+        geo_df["avg_revenue_per_order"] = (
+            geo_df["revenue"] / geo_df["orders"].replace(0, np.nan)
+        )
+        if customer_col:
+            geo_df["avg_revenue_per_customer"] = (
+                geo_df["revenue"] / geo_df["customers"].replace(0, np.nan)
+            )
+        if seller_col:
+            geo_df["revenue_per_seller"] = (
+                geo_df["revenue"] / geo_df["sellers"].replace(0, np.nan)
+            )
+
+        result[key] = geo_df.sort_values("revenue", ascending=False).reset_index(drop=True)
+
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 19. MARKET OPPORTUNITY  (Q36)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_market_opportunity(df, region_col, revenue_col, customer_col, order_col):
+    """
+    Identify high-spend but low-penetration markets for marketing investment.
+
+    Designed for Q36: Which geographic markets should receive additional marketing
+    investment based on strong customer spending but relatively low customer penetration?
+
+    Logic: markets at or above the median revenue-per-customer AND below the median
+    customer count are flagged as high-opportunity (strong spend, underserved size).
+
+    Parameters
+    ----------
+    df           : DataFrame — one row per order-item.
+    region_col   : str — geographic grouping column (state, city, region).
+    revenue_col  : str — revenue column.
+    customer_col : str — customer identifier column.
+    order_col    : str — order identifier column.
+
+    Returns
+    -------
+    DataFrame with: region_col, revenue, customers, orders,
+                    revenue_per_customer, orders_per_customer,
+                    opportunity_flag (True = high-spend AND low-penetration).
+    Sorted by revenue_per_customer descending.
+    """
+    result = df.groupby(region_col, as_index=False).agg(
+        revenue=(revenue_col, "sum"),
+        customers=(customer_col, "nunique"),
+        orders=(order_col, "nunique"),
+    )
+    result["revenue_per_customer"] = (
+        result["revenue"] / result["customers"].replace(0, np.nan)
+    )
+    result["orders_per_customer"] = (
+        result["orders"] / result["customers"].replace(0, np.nan)
+    )
+
+    med_rpc  = result["revenue_per_customer"].median()
+    med_cust = result["customers"].median()
+    result["opportunity_flag"] = (
+        (result["revenue_per_customer"] >= med_rpc) &
+        (result["customers"] < med_cust)
+    )
+
+    return result.sort_values("revenue_per_customer", ascending=False).reset_index(drop=True)

@@ -1,18 +1,85 @@
 """
 visualization_functions.py
 --------------------------
-General-purpose Plotly visualization building blocks for the Olist e-commerce dataset.
+Pure presentation layer — every function returns a plotly.graph_objects.Figure.
+Nothing is computed or mutated here; call fig.show() or pass to Dash / Streamlit.
 
-Each function accepts a DataFrame (or dict/Series) returned by a function in
+RULE
+----
+  computation functions  →  produce data      (computational_functions.py)
+  visualization functions →  consume data, produce Figures  (this file)
+
+Every function accepts a DataFrame (or dict/Series) returned by a function in
 computational_functions.py plus explicit column-name parameters.
-Every function returns a plotly.graph_objects.Figure — nothing is rendered here;
-call fig.show() or pass it to Dash / Streamlit yourself.
 
-Typical usage pattern
----------------------
+Typical usage
+-------------
 result_df = compute_revenue_share(df, group_col="seller_id", revenue_col="price")
 fig       = plot_bar(result_df, x="seller_id", y="revenue", title="Revenue by Seller", top_n=20)
 fig.show()
+
+Question coverage
+-----------------
+Sec 1 – Executive Revenue
+  Q1   plot_kpi_cards           ← compute_kpis
+  Q2   plot_line · plot_combo   ← compute_monthly_series · compute_growth_rate · compute_rolling_avg
+  Q3   plot_bar                 ← compute_monthly_revenue_rank
+
+Sec 2 – Revenue Concentration
+  Q4   plot_concentration_summary · plot_pareto
+                                ← compute_concentration_stats · compute_pareto
+  Q5   plot_pareto · plot_bar   ← compute_revenue_share
+  Q6   plot_pareto              ← compute_pareto
+
+Sec 3 – Customer Value
+  Q7   plot_bar · plot_distribution
+                                ← compute_revenue_share · compute_distribution_stats
+  Q8   plot_distribution        ← compute_distribution_stats
+  Q9   plot_bar · plot_treemap  ← compute_geographic_summary
+
+Sec 4 – Product Performance
+  Q10  plot_bar                 ← compute_product_performance
+  Q11  plot_bar · plot_treemap  ← compute_revenue_share
+  Q12  plot_scatter             ← compute_product_performance
+  Q13  plot_scatter             ← compute_product_performance
+
+Sec 5 – Seller Performance
+  Q14  plot_bar                 ← compute_revenue_share
+  Q15  plot_scatter             ← aggregate_by
+  Q16  plot_bar                 ← compute_geographic_summary
+
+Sec 6 – Geographic Performance
+  Q17  plot_bar · plot_treemap  ← compute_geographic_summary
+  Q18  plot_bar                 ← compute_geographic_summary
+  Q19  plot_bar                 ← compute_freight_ratio
+
+Sec 7 – Delivery Performance
+  Q20  plot_line · plot_combo   ← compute_delivery_metrics · compute_monthly_series
+  Q21  plot_bar                 ← compute_delivery_metrics
+  Q22  plot_bar                 ← compute_delivery_metrics
+  Q23  plot_kpi_cards           ← compute_delivery_metrics
+
+Sec 8 – Customer Satisfaction
+  Q24  plot_scatter             ← compute_correlation
+  Q25  plot_bar                 ← compute_rating_summary
+  Q26  plot_bar                 ← compute_rating_summary
+  Q27  plot_line · plot_combo   ← compute_rating_summary
+
+Sec 9 – Payment Behavior
+  Q28  plot_bar                 ← compute_payment_summary
+  Q29  plot_scatter · plot_bar  ← compute_payment_summary
+  Q30  plot_bar                 ← compute_payment_summary
+
+Sec 10 – Operational Efficiency
+  Q31  plot_distribution · plot_scatter
+                                ← compute_basket_size · compute_correlation
+  Q32  plot_scatter             ← compute_freight_ratio
+  Q33  plot_kpi_cards           ← compute_freight_ratio
+
+Sec 11 – Strategic Investment
+  Q34  plot_quadrant            ← compute_composite_score
+  Q35  plot_quadrant            ← compute_composite_score
+  Q36  plot_quadrant            ← compute_market_opportunity
 """
 
 import pandas as pd
@@ -504,4 +571,50 @@ def plot_quadrant(df, x, y, size, label_col, title,
     fig.add_hline(y=df[y].median(), line_dash="dash", line_color="grey",
                   annotation_text=f"Median {y_label or y}", annotation_position="bottom right")
 
+    return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11. CONCENTRATION SUMMARY CHART  (Q4)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def plot_concentration_summary(stats_dict, title, height=350):
+    """
+    Horizontal bar chart showing the revenue share captured by the top X% of entities.
+
+    Feed with the output of compute_concentration_stats().
+
+    Parameters
+    ----------
+    stats_dict : dict — output of compute_concentration_stats().
+                 Expected keys: 'top_1pct', 'top_5pct', 'top_10pct' (and optionally
+                 'pareto_ratio', which is excluded from the bars as it is dimensionally
+                 different from a percentage share).
+    title      : str
+    height     : int
+
+    Returns
+    -------
+    go.Figure — horizontal bar chart with revenue-share % on the x-axis.
+    """
+    bar_data = {k: v for k, v in stats_dict.items() if k != "pareto_ratio"}
+    labels   = [k.replace("_", " ").upper() for k in bar_data]
+    values   = list(bar_data.values())
+
+    fig = go.Figure(go.Bar(
+        x=values,
+        y=labels,
+        orientation="h",
+        text=[f"{v:.1f}%" for v in values],
+        textposition="outside",
+        marker_color=_PALETTE[0],
+    ))
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Revenue Share (%)",
+        xaxis_range=[0, 105],
+        height=height,
+        margin=dict(l=100, r=40, t=60, b=40),
+    )
     return fig
