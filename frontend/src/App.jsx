@@ -3,56 +3,46 @@ import axios from "axios";
 import "./App.css";
 
 
-function App(){
+function App() {
+
+  const [users, setUsers] = useState([]);
 
 
-const [users,setUsers] = useState([]);
+  useEffect(() => {
+
+    axios
+      .get("http://localhost:8000/users")
+      .then(response => {
+
+        setUsers(response.data.users);
+
+      })
+      .catch(error => {
+
+        console.error("Error fetching users:", error);
+
+      });
+
+  }, []);
 
 
-useEffect(()=>{
+  return (
 
+    <ul>
 
-axios
-.get("http://localhost:8000/users")
+      {
+        users.map((user, index) => (
 
-.then(response=>{
+          <li key={index}>
+            {index + 1}: {user.customer_unique_id}
+          </li>
 
+        ))
+      }
 
-setUsers(
-    response.data.users
-)
+    </ul>
 
-
-})
-
-
-},[])
-
-
-
-return (
-
-<ul>
-
-{
-users.map(user=>(
-
-<li key={user.customer_city }>
-
-{user.customer_unique_id}
-
-</li>
-
-
-))
-
-}
-
-
-</ul>
-
-)
-
+  );
 
 }
 
