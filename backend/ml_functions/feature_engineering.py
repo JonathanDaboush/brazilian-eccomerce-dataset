@@ -1,3 +1,4 @@
+import pandas as pd
 def add_date_features(df, column):
     df = df.copy(deep=False)
     df[column] = pd.to_datetime(df[column], errors="coerce")
