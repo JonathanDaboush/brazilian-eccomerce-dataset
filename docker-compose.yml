@@ -1,3 +1,4 @@
+name: ecommerce-project
 services:
 
 # ==========================================================
@@ -92,7 +93,29 @@ services:
     networks:
       - data-network
 
+  loader:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
 
+    container_name: star-data-loader
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./backend:/app
+
+    working_dir: /app
+
+    command: ["python", "quick_load.py"]
+
+    networks:
+      - data-network
 # ==========================================================
 # AIRFLOW POSTGRES DATABASE
 # ==========================================================

@@ -1,36 +1,42 @@
 from sqlalchemy import text
 from database import engine
-from controller.producer import send_user_event
-from quick_load import database_has_data, load_all_csv
+from quick_load import import_all_csvs
+from sqlalchemy.exc import SQLAlchemyError
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+def get_customers(i=1):
+
+    try:
+        with engine.connect() as connection:
+
+            result = connection.execute(
+                text("""
+                    SELECT *
+                    FROM customers
+                    LIMIT 100
+                """)
+            )
+
+            rows = result.fetchall()
+            logger.info(f"Data number --target-- : {len(rows)}")
+            
+            
+            return [dict(row._mapping) for row in rows]
 
 
-def get_users():
+    except SQLAlchemyError as e:
 
-    if not database_has_data():
-        load_all_csv()
+        print(f"Database error: {e}")
 
-    with engine.connect() as connection:
+        logger.info(f"THIS ATTEMPT FAILED SO TRY AGAIN IN ERROR.")
+        
+        if i > 0:
+            print("Reloading data...")
+            import_all_csvs()
+            return get_customers(i-1)
 
-        result = connection.execute(
-            text("""
-                SELECT *
-                FROM customers
-                LIMIT 100
-            """)
-        )
-
-        rows = result.fetchall()
-
-
-    users = [
-        dict(row._mapping)
-        for row in rows
-    ]
-
-
-    # Send every user into Kafka
-    for user in users:
-        send_user_event(user)
-
-
-    return users
+        return []
+    except Exception as e:
+        logger.info(f"THIS ATTEMPT FAILED SO TRY AGAIN IN ERROR. heres why : {e} ")

@@ -1,0 +1,47 @@
+{
+  "customers": {
+    "pk_column": "customer_id",
+    "used_count": 5000,
+    "unused_count": 94441
+  },
+  "sellers": {
+    "pk_column": "seller_id",
+    "used_count": 1058,
+    "unused_count": 2037
+  },
+  "products": {
+    "pk_column": "product_id",
+    "used_count": 3681,
+    "unused_count": 29270
+  },
+  "orders": {
+    "pk_column": "order_id",
+    "used_count": 5000,
+    "unused_count": 94441
+  },
+  "order_items": {
+    "pk_column": "order_item_key",
+    "used_count": 5685,
+    "unused_count": 106965
+  },
+  "payments": {
+    "pk_column": "payment_id",
+    "used_count": 5255,
+    "unused_count": 98631
+  },
+  "reviews": {
+    "pk_column": "review_key",
+    "used_count": 4934,
+    "unused_count": 93476
+  },
+  "geolocation": {
+    "pk_column": "geolocation_zip_code_prefix",
+    "used_count": 19015,
+    "unused_count": 0
+  },
+  "category_translation": {
+    "pk_column": "product_category_name",
+    "used_count": 71,
+    "unused_count": 0
+  }
+}

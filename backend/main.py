@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from controller.test_controller import get_users
-from quick_load import load_all_csv
+from controller.test_controller import get_customers
 
 
 app = FastAPI()
@@ -18,17 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.on_event("startup")
-def startup():
-
-    load_all_csv()
-
-
 @app.get("/users")
 def users():
 
-    data = get_users()
+    data = get_customers()
     return {
         "users": data
     }

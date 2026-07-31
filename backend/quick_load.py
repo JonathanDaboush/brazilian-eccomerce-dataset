@@ -1,18 +1,15 @@
 import os
 import glob
 import pandas as pd
-
 from sqlalchemy import create_engine as sqlalchemy_create_engine
-from sqlalchemy import inspect
+
 from dotenv import load_dotenv
+import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.ERROR)
 
 
 load_dotenv()
-
-
-# ==========================
-# DATABASE CONNECTION
-# ==========================
 
 MYSQL_USER = os.getenv("MYSQL_USER")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
@@ -20,102 +17,40 @@ MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE")
 
-
 DATABASE_URL = (
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
     f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
 )
 
-
 engine = sqlalchemy_create_engine(DATABASE_URL)
 
+CSV_DIRECTORY = "/app/original_data"
 
-CSV_FOLDER = "original_data"
-
-
-def clean_table_name(filename):
-
-    name = os.path.basename(filename)
-
-    name = name.replace(".csv", "")
-    name = name.lower()
-    name = name.replace("-", "_")
-    name = name.replace(" ", "_")
-
-    return name
-
-
-
-def database_has_data():
-
-    inspector = inspect(engine)
-
-    tables = inspector.get_table_names()
-
-    # If no tables exist, database is empty
-    if not tables:
-        return False
-
-    return True
-
-
-
-def load_all_csv():
-
-    # Prevent duplicate loading
-    if database_has_data():
-
-        print("Database already contains tables. Skipping CSV load.")
-        return
-
-
-    csv_files = glob.glob(
-        os.path.join(CSV_FOLDER, "*.csv")
-    )
-
-
+def import_all_csvs():
+    
+    # Looks into /app/original_data/*.csv inside Docker
+    csv_files = glob.glob(os.path.join(CSV_DIRECTORY, "*.csv"))
+    
     if not csv_files:
-        print("No CSV files found.")
+        print(f"No CSV files found in {CSV_DIRECTORY}. Check your volume mapping!")
         return
 
-
-    print(f"Found {len(csv_files)} CSV files")
-
-
-    for file in csv_files:
-
+    for file_path in csv_files:
+        file_name = os.path.basename(file_path)
+        # Drops the .csv extension and creates a safe database table name
+        table_name = os.path.splitext(file_name)[0].lower().replace("-", "_").replace(" ", "_")
+        
         try:
-
-            table_name = clean_table_name(file)
-
-            print(f"\nLoading {file}")
-
-            df = pd.read_csv(
-                file,
-                low_memory=False
-            )
-
-            print(f"Rows: {len(df)}")
-
-
-            df.to_sql(
-                name=table_name,
-                con=engine,
-                if_exists="replace",
-                index=False,
-                chunksize=5000
-            )
-
-
-            print(
-                f"SUCCESS: {table_name} inserted"
-            )
-
-
+            print(f"Importing {file_name} into table '{table_name}'...")
+            df = pd.read_csv(file_path)
+            df.to_sql(table_name, con=engine, if_exists='replace', index=False)
+            print(f"Successfully loaded {len(df)} rows.")
         except Exception as e:
+            print(f"Error importing {file_name}: {e}")
 
-            print(
-                f"FAILED loading {file}"
-            )
+if __name__ == "__main__":
+    print("Starting initial data load")
 
-            print(e)
+    import_all_csvs()
+
+    print("Data load complete")
