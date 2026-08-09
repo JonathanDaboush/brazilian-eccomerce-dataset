@@ -5,8 +5,6 @@ import json
 import logging
 import os
 
-from kafka import KafkaConsumer
-
 from database import SessionLocal, init_db
 from services import apply_replay_event, ensure_event_bank
 
@@ -25,6 +23,8 @@ def build_consumer(
     topic: str = DEFAULT_TOPIC,
     group_id: str = DEFAULT_GROUP,
 ) -> KafkaConsumer:
+    from kafka import KafkaConsumer
+
     return KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap_servers,

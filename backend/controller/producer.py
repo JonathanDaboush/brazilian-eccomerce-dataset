@@ -6,8 +6,6 @@ import logging
 import os
 import time
 
-from kafka import KafkaProducer
-
 from services import ensure_event_bank, load_event_bank
 
 
@@ -19,6 +17,8 @@ DEFAULT_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
 
 def build_producer(bootstrap_servers: str = DEFAULT_BOOTSTRAP) -> KafkaProducer:
+    from kafka import KafkaProducer
+
     return KafkaProducer(
         bootstrap_servers=bootstrap_servers,
         acks="all",
