@@ -93,6 +93,41 @@ services:
     networks:
       - data-network
 
+  kafka-consumer:
+
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: ecommerce-kafka-consumer
+
+    restart: unless-stopped
+
+    depends_on:
+
+      mysql:
+        condition: service_healthy
+
+      kafka:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./backend:/app
+
+    working_dir: /app
+
+    command:
+      [
+        "python",
+        "controller/consumer.py"
+      ]
+
+    networks:
+      - data-network
+
   loader:
     build:
       context: ./backend

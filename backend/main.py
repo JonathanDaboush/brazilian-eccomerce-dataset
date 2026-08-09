@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from database import get_session, init_db
+from controller.producer import publish_events
 from services import (
     ensure_event_bank,
     get_batch_history,
@@ -91,6 +92,18 @@ def replay_events(request: ReplayRequest, session: Session = Depends(get_session
     try:
         return run_direct_replay(
             session,
+            start_offset=request.start_offset,
+            limit=request.limit,
+            pace_ms=request.pace_ms,
+        )
+    except Exception as exc:  # pragma: no cover - surfaced to caller
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/replay/publish")
+def publish_replay_events(request: ReplayRequest) -> dict:
+    try:
+        return publish_events(
             start_offset=request.start_offset,
             limit=request.limit,
             pace_ms=request.pace_ms,
