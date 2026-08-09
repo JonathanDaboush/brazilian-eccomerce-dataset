@@ -25,11 +25,16 @@ export async function fetchModels() {
   return data.models;
 }
 
-export async function runReplay(limit) {
+export async function fetchFeatureSummary() {
+  const { data } = await api.get("/api/features");
+  return data;
+}
+
+export async function runReplay(limit, paceMs = 0) {
   const { data } = await api.post("/api/replay", {
     start_offset: 0,
     limit,
-    pace_ms: 0,
+    pace_ms: paceMs,
   });
   return data;
 }
@@ -42,6 +47,16 @@ export async function resetReplay() {
 export async function fetchPrediction(modelName, rowIndex = 0) {
   const { data } = await api.get(`/api/ml/predict/${modelName}`, {
     params: { row_index: rowIndex },
+  });
+  return data;
+}
+
+export async function uploadFile(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/api/upload", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 60000,
   });
   return data;
 }

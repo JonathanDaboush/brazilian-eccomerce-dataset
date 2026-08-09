@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -13,11 +13,13 @@ from services import (
     ensure_event_bank,
     get_batch_history,
     get_dashboard_snapshot,
+    get_feature_summary,
     get_recent_activity,
     get_system_health,
     list_ml_models,
     load_event_bank,
     predict_from_training_sample,
+    process_excel_upload,
     reset_replay_state,
     run_direct_replay,
 )
@@ -146,6 +148,23 @@ def ml_prediction(model_name: str, row_index: int = Query(default=0, ge=0)) -> d
         return predict_from_training_sample(model_name, row_index=row_index)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - surfaced to caller
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/features")
+def feature_summary(session: Session = Depends(get_session)) -> dict:
+    return get_feature_summary(session)
+
+
+@app.post("/api/upload")
+async def upload_data_file(file: UploadFile = File(...)) -> dict:
+    filename = file.filename or "upload"
+    try:
+        content = await file.read()
+        return process_excel_upload(content, filename)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - surfaced to caller

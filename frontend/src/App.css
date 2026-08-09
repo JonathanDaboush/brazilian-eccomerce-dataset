@@ -48,6 +48,14 @@
   gap: 12px;
 }
 
+.pace-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #4b5d77;
+  font-size: 0.9rem;
+}
+
 .grid {
   display: grid;
   gap: 20px;
@@ -55,7 +63,7 @@
 }
 
 .kpi-grid {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
 }
 
 .two-column {
@@ -75,7 +83,8 @@
 }
 
 .kpi-card strong {
-  font-size: 1.7rem;
+  font-size: 1.6rem;
+  word-break: break-word;
 }
 
 .panel {
@@ -137,6 +146,7 @@ button {
   background: #1d5eff;
   color: #ffffff;
   border-color: #1d5eff;
+  cursor: pointer;
 }
 
 button.secondary {
@@ -159,6 +169,11 @@ button:disabled {
   color: #8c1f1f;
 }
 
+.banner.success {
+  border-left: 5px solid #2e9e58;
+  color: #1a5c35;
+}
+
 .empty-state {
   padding: 28px;
   text-align: center;
@@ -172,6 +187,74 @@ button:disabled {
   flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+/* Status badges */
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.badge-green {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.badge-red {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge-blue {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.badge-gray {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* Upload area */
+.upload-area {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.upload-hint {
+  color: #4b5d77;
+  margin: 0;
+  font-size: 0.93rem;
+}
+
+.file-input {
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+  color: #10233d;
+  font: inherit;
+  cursor: pointer;
+}
+
+.upload-status {
+  color: #4b6a91;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.upload-error {
+  color: #8c1f1f;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.preview-scroll {
+  overflow-x: auto;
 }
 
 @media (max-width: 900px) {

@@ -578,6 +578,8 @@ def get_dashboard_snapshot(session: Session) -> dict[str, Any]:
                 "cancelled_orders": 0,
                 "avg_order_value": 0.0,
                 "unique_customers": 0,
+                "avg_delivery_days": None,
+                "avg_satisfaction_score": None,
             },
             "trends": [],
             "top_categories": [],
@@ -591,6 +593,19 @@ def get_dashboard_snapshot(session: Session) -> dict[str, Any]:
     revenue = round(sum(row["payment_value"] or row["revenue"] for row in order_rows), 2)
     unique_customers = len({row["customer_unique_id"] for row in order_rows if row["customer_unique_id"]})
     avg_order_value = round(revenue / len(order_rows), 2) if order_rows else 0.0
+
+    delivery_durations = []
+    for row in order_rows:
+        purchase = row.get("purchase_ts")
+        delivered = row.get("delivered_ts")
+        if purchase and delivered:
+            delta = (delivered - purchase).total_seconds() / 86400
+            if 0 < delta < 120:
+                delivery_durations.append(delta)
+    avg_delivery_days = round(sum(delivery_durations) / len(delivery_durations), 1) if delivery_durations else None
+
+    review_scores = [row["review_score"] for row in order_rows if row.get("review_score") is not None]
+    avg_satisfaction = round(sum(review_scores) / len(review_scores), 2) if review_scores else None
 
     monthly = defaultdict(lambda: {"orders": 0, "revenue": 0.0, "delivered": 0, "cancelled": 0})
     category_totals: Counter[str] = Counter()
@@ -635,6 +650,8 @@ def get_dashboard_snapshot(session: Session) -> dict[str, Any]:
             "cancelled_orders": cancelled_orders,
             "avg_order_value": avg_order_value,
             "unique_customers": unique_customers,
+            "avg_delivery_days": avg_delivery_days,
+            "avg_satisfaction_score": avg_satisfaction,
         },
         "trends": trends[-12:],
         "top_categories": top_categories,
@@ -742,4 +759,107 @@ def predict_from_training_sample(model_name: str, row_index: int = 0) -> dict[st
         "probabilities": probabilities,
         "score": package.get("score"),
         "feature_count": len(expected_features),
+    }
+
+
+def get_feature_summary(session: Session) -> dict[str, Any]:
+    """Summarise the incremental feature store: customer, seller, and product aggregates."""
+    from database import Seller
+
+    customers = session.execute(select(Customer)).scalars().all()
+    sellers = session.execute(select(Seller)).scalars().all()
+    products = session.execute(select(Product)).scalars().all()
+    payments_all = session.execute(select(Payment)).scalars().all()
+    items_all = session.execute(select(OrderItem)).scalars().all()
+    orders_all = session.execute(select(Order)).scalars().all()
+
+    payments_by_order: defaultdict[str, float] = defaultdict(float)
+    for p in payments_all:
+        payments_by_order[p.order_id] += p.payment_value or 0
+
+    orders_by_customer: defaultdict[str, list] = defaultdict(list)
+    for o in orders_all:
+        if o.customer_id:
+            orders_by_customer[o.customer_id].append(o)
+
+    customer_lifetime: list[dict[str, Any]] = []
+    for customer in customers[:20]:
+        cid = customer.customer_id
+        corders = orders_by_customer.get(cid, [])
+        total_revenue = sum(payments_by_order.get(o.order_id, 0) for o in corders)
+        customer_lifetime.append(
+            {
+                "customer_id": cid[:8] + "…",
+                "state": customer.customer_state,
+                "order_count": len(corders),
+                "lifetime_revenue": round(total_revenue, 2),
+            }
+        )
+    customer_lifetime.sort(key=lambda row: row["lifetime_revenue"], reverse=True)
+
+    items_by_seller: defaultdict[str, list] = defaultdict(list)
+    for item in items_all:
+        if item.seller_id:
+            items_by_seller[item.seller_id].append(item)
+
+    seller_summary: list[dict[str, Any]] = []
+    for seller in sellers[:20]:
+        sid = seller.seller_id
+        sitems = items_by_seller.get(sid, [])
+        revenue = sum((i.price or 0) for i in sitems)
+        seller_summary.append(
+            {
+                "seller_id": sid[:8] + "…",
+                "state": seller.seller_state,
+                "order_count": len({i.order_id for i in sitems}),
+                "revenue": round(revenue, 2),
+            }
+        )
+    seller_summary.sort(key=lambda row: row["revenue"], reverse=True)
+
+    return {
+        "customer_count": len(customers),
+        "seller_count": len(sellers),
+        "product_count": len(products),
+        "top_customers": customer_lifetime[:10],
+        "top_sellers": seller_summary[:10],
+    }
+
+
+def process_excel_upload(file_bytes: bytes, filename: str) -> dict[str, Any]:
+    """
+    Accept an uploaded Excel or CSV file, validate it, and return a preview.
+
+    The original bytes are never written to the source data directory; they are
+    read into memory only so the originals remain untouched.
+    """
+    import io
+
+    lower = filename.lower()
+    try:
+        if lower.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(file_bytes))
+        elif lower.endswith((".xls", ".xlsx")):
+            df = pd.read_excel(io.BytesIO(file_bytes))
+        else:
+            raise ValueError(f"Unsupported file type: {filename!r}. Upload a .csv, .xls, or .xlsx file.")
+    except Exception as exc:
+        raise ValueError(f"Could not parse uploaded file: {exc}") from exc
+
+    if df.empty:
+        raise ValueError("The uploaded file contains no rows.")
+
+    preview_rows = df.head(5).where(pd.notnull(df.head(5)), other=None).to_dict(orient="records")
+    null_counts = df.isnull().sum()
+    columns_with_nulls = [col for col in df.columns if null_counts[col] > 0]
+
+    return {
+        "filename": filename,
+        "rows": len(df),
+        "columns": list(df.columns),
+        "column_count": len(df.columns),
+        "preview": preview_rows,
+        "null_columns": columns_with_nulls,
+        "validation": "passed" if not df.empty else "empty",
+        "note": "Original file has not been modified. This is a preview of the uploaded data only.",
     }
