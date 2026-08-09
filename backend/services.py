@@ -695,20 +695,28 @@ def list_ml_models() -> list[dict[str, Any]]:
                     "supports_prediction": model_name in PRIMARY_TARGET,
                 }
             )
-        except Exception as exc:
+        except Exception:
             models.append(
                 {
                     "model_name": model_name,
-                    "error": str(exc),
+                    "error": "Failed to load model artifact.",
                     "supports_prediction": False,
                 }
             )
     return models
 
 
+def _validate_model_name(model_name: str) -> None:
+    """Reject model names that could traverse outside the model directory."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", model_name):
+        raise ValueError(f"Invalid model name: {model_name!r}")
+
+
 def _load_model_package(model_name: str) -> dict[str, Any]:
-    path = MODEL_DIR / f"{model_name}.pkl"
-    if not path.exists():
+    _validate_model_name(model_name)
+    path = (MODEL_DIR / f"{model_name}.pkl").resolve()
+    if not path.is_file() or not str(path).startswith(str(MODEL_DIR.resolve())):
         raise FileNotFoundError(f"Unknown model '{model_name}'")
     return pickle.loads(path.read_bytes())
 
@@ -717,8 +725,9 @@ def predict_from_training_sample(model_name: str, row_index: int = 0) -> dict[st
     if model_name not in PRIMARY_TARGET:
         raise ValueError(f"Model '{model_name}' does not expose supervised predictions.")
 
-    dataset_path = ML_DATA_DIR / f"{model_name}.csv"
-    if not dataset_path.exists():
+    _validate_model_name(model_name)
+    dataset_path = (ML_DATA_DIR / f"{model_name}.csv").resolve()
+    if not dataset_path.is_file() or not str(dataset_path).startswith(str(ML_DATA_DIR.resolve())):
         raise FileNotFoundError(f"Training dataset not found for model '{model_name}'")
 
     package = _load_model_package(model_name)
