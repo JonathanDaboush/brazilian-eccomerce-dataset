@@ -706,17 +706,11 @@ def list_ml_models() -> list[dict[str, Any]]:
     return models
 
 
-def _validate_model_name(model_name: str) -> None:
-    """Reject model names that could traverse outside the model directory."""
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9_\-]+", model_name):
-        raise ValueError(f"Invalid model name: {model_name!r}")
-
-
 def _load_model_package(model_name: str) -> dict[str, Any]:
-    _validate_model_name(model_name)
-    path = (MODEL_DIR / f"{model_name}.pkl").resolve()
-    if not path.is_file() or not str(path).startswith(str(MODEL_DIR.resolve())):
+    """Load a model package by looking up from filesystem-enumerated paths only."""
+    known = {p.stem: p for p in MODEL_DIR.glob("*.pkl")}
+    path = known.get(model_name)
+    if path is None:
         raise FileNotFoundError(f"Unknown model '{model_name}'")
     return pickle.loads(path.read_bytes())
 
@@ -725,9 +719,9 @@ def predict_from_training_sample(model_name: str, row_index: int = 0) -> dict[st
     if model_name not in PRIMARY_TARGET:
         raise ValueError(f"Model '{model_name}' does not expose supervised predictions.")
 
-    _validate_model_name(model_name)
-    dataset_path = (ML_DATA_DIR / f"{model_name}.csv").resolve()
-    if not dataset_path.is_file() or not str(dataset_path).startswith(str(ML_DATA_DIR.resolve())):
+    known_datasets = {p.stem: p for p in ML_DATA_DIR.glob("*.csv")}
+    dataset_path = known_datasets.get(model_name)
+    if dataset_path is None:
         raise FileNotFoundError(f"Training dataset not found for model '{model_name}'")
 
     package = _load_model_package(model_name)
