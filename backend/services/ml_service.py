@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -23,6 +24,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from services.upload_service import get_dataset_file_path
 
+logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODELS_DIR = BASE_DIR / "models"
 MODEL_VERSIONS_DIR = BASE_DIR / "model_versions"
@@ -430,7 +432,8 @@ def retrain_all_models() -> dict[str, Any]:
             if get_dataset_file_path(name).exists():
                 runs.append(retrain_model(name))
         except Exception as exc:
-            runs.append({"ok": False, "model": name, "error": str(exc)})
+            logger.exception("Retraining failed for model=%s", name)
+            runs.append({"ok": False, "model": name, "error": f"{exc.__class__.__name__} during retraining"})
     return {"runs": runs}
 
 
