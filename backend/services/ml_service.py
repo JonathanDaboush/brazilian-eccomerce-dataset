@@ -85,12 +85,57 @@ def _build_feature_frame(model_name: str, features: dict | None) -> pd.DataFrame
     return frame
 
 
+def _apply_package_preprocessing(package: dict, frame: pd.DataFrame) -> pd.DataFrame:
+    transformed = frame.copy()
+
+    for col in package.get("dropped_columns", []) or []:
+        if col in transformed.columns:
+            transformed = transformed.drop(columns=[col])
+
+    fill_values = package.get("fill_values", {}) or {}
+    for col, val in fill_values.items():
+        if col in transformed.columns:
+            transformed[col] = transformed[col].fillna(val)
+
+    clipping_values = package.get("clipping_values", {}) or {}
+    for col, bounds in clipping_values.items():
+        if col in transformed.columns and isinstance(bounds, dict):
+            low = bounds.get("low")
+            high = bounds.get("high")
+            transformed[col] = pd.to_numeric(transformed[col], errors="coerce")
+            transformed[col] = transformed[col].clip(lower=low, upper=high)
+
+    encoder = package.get("encoder")
+    if encoder is not None and hasattr(encoder, "feature_names_in_"):
+        enc_cols = list(encoder.feature_names_in_)
+        for col in enc_cols:
+            if col not in transformed.columns:
+                transformed[col] = "unknown"
+        transformed[enc_cols] = encoder.transform(transformed[enc_cols])
+
+    scaler = package.get("scaler")
+    if scaler is not None and hasattr(scaler, "feature_names_in_"):
+        scale_cols = list(scaler.feature_names_in_)
+        for col in scale_cols:
+            if col not in transformed.columns:
+                transformed[col] = 0.0
+        transformed[scale_cols] = scaler.transform(transformed[scale_cols])
+
+    return transformed
+
+
 def predict(model_name: str, features: dict | None = None) -> dict:
     if model_name not in MODEL_FILES:
         raise ValueError(f"Unknown model '{model_name}'")
 
-    model = _load_model(model_name)
+    model_obj = _load_model(model_name)
+    package = model_obj if isinstance(model_obj, dict) else {"model": model_obj}
+    model = package["model"]
     frame = _build_feature_frame(model_name, features)
+    frame = _apply_package_preprocessing(package, frame)
+    feature_names = package.get("feature_names")
+    if feature_names:
+        frame = frame.reindex(columns=feature_names, fill_value=0)
 
     if model_name == "product_recommendation":
         distances, indices = model.kneighbors(frame)

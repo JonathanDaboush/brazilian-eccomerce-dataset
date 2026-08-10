@@ -182,82 +182,41 @@ def build_event_bank_if_missing() -> dict[str, Any]:
         return {"created": False, "events": int(count)}
 
     logger.info("Creating immutable event bank from source Olist tables")
+    event_definitions = [
+        ("order_created", "order_purchase_timestamp", None),
+        ("order_payment", "order_approved_at", None),
+        ("order_shipped", "order_delivered_carrier_date", None),
+        ("order_delivered", "order_delivered_customer_date", None),
+        ("order_cancelled", "COALESCE(order_approved_at, order_purchase_timestamp)", "order_status = 'canceled'"),
+    ]
 
-    event_insert_sql = """
-        INSERT IGNORE INTO event_bank_events
-            (event_id, order_id, event_type, event_timestamp, event_key, payload_json, source_hash)
-        VALUES
-            (:event_id, :order_id, :event_type, :event_timestamp, :event_key, CAST(:payload_json AS JSON), :source_hash)
-    """
+    total_inserted = 0
+    for event_type, ts_expr, extra_filter in event_definitions:
+        filter_sql = f"AND {extra_filter}" if extra_filter else ""
+        result = _exec(
+            f"""
+            INSERT IGNORE INTO event_bank_events (event_id, order_id, event_type, event_timestamp, event_key, payload_json, source_hash)
+            SELECT
+                CONCAT(order_id, ':{event_type}:', {ts_expr}) AS event_id,
+                order_id,
+                '{event_type}' AS event_type,
+                {ts_expr} AS event_timestamp,
+                order_id AS event_key,
+                JSON_OBJECT(
+                    'order_id', order_id,
+                    'event_type', '{event_type}',
+                    'event_timestamp', CAST({ts_expr} AS CHAR),
+                    'order_status', order_status
+                ) AS payload_json,
+                SHA2(CONCAT(order_id, ':{event_type}:', {ts_expr}), 256) AS source_hash
+            FROM orders
+            WHERE {ts_expr} IS NOT NULL {filter_sql}
+            """
+        )
+        total_inserted += int(result.rowcount or 0)
 
-    order_rows = _exec(
-        """
-        SELECT order_id, customer_id, order_status,
-               order_purchase_timestamp, order_approved_at,
-               order_delivered_carrier_date, order_delivered_customer_date,
-               order_estimated_delivery_date
-        FROM orders
-        ORDER BY order_purchase_timestamp, order_id
-        """
-    ).mappings().all()
-
-    payment_map = {}
-    for row in _exec("SELECT payment_id, order_id, payment_type, payment_installments, payment_value FROM order_payments").mappings().all():
-        payment_map.setdefault(row["order_id"], []).append(dict(row))
-
-    item_map = {}
-    for row in _exec("SELECT order_id, order_item_id, product_id, seller_id, price, freight_value FROM order_items").mappings().all():
-        item_map.setdefault(row["order_id"], []).append(dict(row))
-
-    review_map = {}
-    for row in _exec(
-        "SELECT review_key, order_id, review_score, review_creation_date, review_answer_timestamp FROM order_reviews"
-    ).mappings().all():
-        review_map.setdefault(row["order_id"], []).append(dict(row))
-
-    total = 0
-    for row in order_rows:
-        order_id = row["order_id"]
-        base_payload = {
-            "order": dict(row),
-            "items": item_map.get(order_id, []),
-            "payments": payment_map.get(order_id, []),
-            "reviews": review_map.get(order_id, []),
-        }
-
-        lifecycle = [
-            ("order_created", row["order_purchase_timestamp"]),
-            ("order_payment", row["order_approved_at"]),
-            ("order_shipped", row["order_delivered_carrier_date"]),
-            ("order_delivered", row["order_delivered_customer_date"]),
-        ]
-
-        if row["order_status"] == "canceled":
-            lifecycle.append(("order_cancelled", row["order_approved_at"] or row["order_purchase_timestamp"]))
-
-        for event_type, event_ts in lifecycle:
-            if not event_ts:
-                continue
-            payload = dict(base_payload)
-            payload["event_type"] = event_type
-            payload["event_timestamp"] = str(event_ts)
-            event_id = f"{order_id}:{event_type}:{str(event_ts)}"
-            source_hash = f"{order_id}:{event_type}:{len(payload['items'])}:{len(payload['payments'])}:{len(payload['reviews'])}"
-            _exec(
-                event_insert_sql,
-                {
-                    "event_id": event_id,
-                    "order_id": order_id,
-                    "event_type": event_type,
-                    "event_timestamp": event_ts,
-                    "event_key": order_id,
-                    "payload_json": json.dumps(payload, default=str),
-                    "source_hash": source_hash,
-                },
-            )
-            total += 1
-
-    return {"created": True, "events": total}
+    total = _exec("SELECT COUNT(*) as c FROM event_bank_events").first()._mapping["c"]
+    return {"created": True, "events": int(total), "inserted_now": total_inserted}
 
 
 def get_replay_state() -> dict[str, Any]:
@@ -333,6 +292,49 @@ def append_log(status: str, details: str, event_id: str | None = None, order_id:
             "details": details[:5000],
         },
     )
+
+
+def _load_order_context(order_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    order = _exec(
+        """
+        SELECT order_id, customer_id, order_status, order_purchase_timestamp, order_approved_at,
+               order_delivered_carrier_date, order_delivered_customer_date, order_estimated_delivery_date
+        FROM orders
+        WHERE order_id = :order_id
+        """,
+        {"order_id": order_id},
+    ).mappings().first()
+    if not order:
+        raise ValueError(f"Order not found for event replay: {order_id}")
+
+    items = _exec(
+        """
+        SELECT order_id, order_item_id, product_id, seller_id, price, freight_value
+        FROM order_items
+        WHERE order_id = :order_id
+        """,
+        {"order_id": order_id},
+    ).mappings().all()
+
+    payments = _exec(
+        """
+        SELECT payment_id, order_id, payment_type, payment_installments, payment_value
+        FROM order_payments
+        WHERE order_id = :order_id
+        """,
+        {"order_id": order_id},
+    ).mappings().all()
+
+    reviews = _exec(
+        """
+        SELECT review_key, order_id, review_score, review_creation_date, review_answer_timestamp
+        FROM order_reviews
+        WHERE order_id = :order_id
+        """,
+        {"order_id": order_id},
+    ).mappings().all()
+
+    return dict(order), [dict(x) for x in items], [dict(x) for x in payments], [dict(x) for x in reviews]
 
 
 def _recompute_customer(customer_id: str):
@@ -479,17 +481,13 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
     event_id = event["event_id"]
     order_id = event["order_id"]
     event_type = event["event_type"]
-    payload = event["payload"]
 
     existing = _exec("SELECT 1 FROM processed_events WHERE event_id = :event_id", {"event_id": event_id}).first()
     if existing:
         append_log("skipped", "Duplicate event skipped", event_id, order_id, event_type)
         return {"status": "duplicate", "event_id": event_id}
 
-    order = payload.get("order", {})
-    items = payload.get("items", [])
-    payments = payload.get("payments", [])
-    reviews = payload.get("reviews", [])
+    order, items, payments, reviews = _load_order_context(order_id)
 
     try:
         _exec(
@@ -584,7 +582,9 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
         if event_type == "order_cancelled":
             _exec("UPDATE replay_orders SET order_status='canceled' WHERE order_id=:order_id", {"order_id": order_id})
 
-        _recompute_customer(order.get("customer_id"))
+        customer_id = order.get("customer_id")
+        if customer_id:
+            _recompute_customer(customer_id)
         _recompute_sellers(order_id)
         _recompute_products(order_id)
 

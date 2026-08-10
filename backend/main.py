@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
+from io import BytesIO
 from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from kafka import KafkaConsumer
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -24,6 +27,7 @@ from services.replay_service import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("olist-api")
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
 app = FastAPI(title="Olist Replay API", version="2.0.0")
 
@@ -63,14 +67,27 @@ def health_system():
         db_error = str(exc)
 
     replay_state = get_replay_state()
-    airflow_state = "configured" if True else "unknown"
-    kafka_state = "configured"
+    airflow_state = "configured"
+    kafka_state = "Healthy"
+    try:
+        probe = KafkaConsumer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            request_timeout_ms=2500,
+            consumer_timeout_ms=1000,
+            api_version_auto_timeout_ms=2000,
+        )
+        probe.topics()
+        probe.close()
+    except Exception:
+        kafka_state = "Warning"
 
     status = "Healthy" if db_ok else "Failed"
     if replay_state["status"] in {"running"}:
         status = "Processing"
     if replay_state["status"] in {"failed"}:
         status = "Failed"
+    if kafka_state == "Warning" and status == "Healthy":
+        status = "Warning"
 
     return {
         "status": status,
@@ -214,7 +231,7 @@ async def validate_excel(file: UploadFile):
 
     content = await file.read()
     try:
-        df = pd.read_excel(content)
+        df = pd.read_excel(BytesIO(content))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse Excel file: {exc}") from exc
 
