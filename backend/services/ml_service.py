@@ -12,6 +12,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, roc_auc_score
@@ -357,6 +358,10 @@ def retrain_model(model_name: str) -> dict[str, Any]:
     X, y, time_col = _prepare_xy(model_name)
     X_train, X_test, y_train, y_test, split_strategy = _split_dataset(model_name, X, y, time_col)
     estimator = _select_estimator(model_name)
+    if model_name in CLASSIFICATION_MODELS and y_train.nunique(dropna=True) < 2:
+        estimator = DummyClassifier(strategy="most_frequent")
+    if model_name in REGRESSION_MODELS and y_train.nunique(dropna=True) < 2:
+        estimator = DummyRegressor(strategy="mean")
     pipeline = Pipeline(
         steps=[
             ("preprocessor", _build_preprocessor(X_train)),
@@ -379,7 +384,7 @@ def retrain_model(model_name: str) -> dict[str, Any]:
     else:
         pred = pipeline.predict(X_test)
         metrics["r2"] = float(r2_score(y_test, pred))
-        metrics["rmse"] = float(mean_squared_error(y_test, pred, squared=False))
+        metrics["rmse"] = float(np.sqrt(mean_squared_error(y_test, pred)))
 
     trained_at = datetime.now(timezone.utc).isoformat()
     version_id = f"{trained_at[:19].replace(':', '').replace('-', '')}-{model_name}"
