@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -13,23 +15,19 @@ from kafka import KafkaProducer
 logger = logging.getLogger(__name__)
 
 TRAINING_DIR = Path(__file__).resolve().parents[1] / "ml_training_data"
+TRAINING_VERSIONS_DIR = Path(__file__).resolve().parents[1] / "training_dataset_versions"
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 ML_INGEST_TOPIC = "ml-training-ingest"
 
-# Column signatures used to auto-detect which dataset a CSV belongs to.
-# Keys are dataset names; values are frozensets of required column names.
 DATASET_SIGNATURES: dict[str, frozenset[str]] = {
     "delivery_delay": frozenset({"order_id", "customer_id", "late_delivery"}),
     "demand_forecasting": frozenset({"product_id", "month", "units_sold"}),
     "order_cancellation": frozenset({"order_id", "customer_id", "cancelled"}),
     "review_prediction": frozenset({"review_id", "order_id", "review_score"}),
-    "customer_purchase_prediction": frozenset(
-        {"customer_id", "customer_unique_id", "future_purchase"}
-    ),
+    "customer_purchase_prediction": frozenset({"customer_id", "customer_unique_id", "future_purchase"}),
     "product_recommendation": frozenset({"customer_id", "product_id", "purchase_count"}),
 }
 
-# Natural dedup keys per dataset (used when appending to avoid duplicates)
 DEDUP_KEYS: dict[str, list[str]] = {
     "delivery_delay": ["order_id"],
     "demand_forecasting": ["product_id", "month"],
@@ -48,42 +46,72 @@ def detect_dataset(columns: list[str]) -> str | None:
     return None
 
 
-def validate_training_csv(content: bytes, filename: str) -> dict[str, Any]:
-    """Parse and validate a CSV without writing anything to disk."""
+def _read_csv_bytes(content: bytes) -> pd.DataFrame:
     try:
-        df = pd.read_csv(pd.io.common.BytesIO(content))
+        return pd.read_csv(BytesIO(content))
     except Exception as exc:
         raise ValueError(f"Failed to parse CSV: {exc}") from exc
 
-    dataset_name = detect_dataset(list(df.columns))
-    if dataset_name is None:
-        raise ValueError(
-            "Cannot identify dataset from column names. "
-            "Expected columns matching one of: "
-            + ", ".join(f"{k}: {sorted(v)}" for k, v in DATASET_SIGNATURES.items())
-        )
 
+def _dataset_root(dataset_name: str) -> Path:
+    return TRAINING_VERSIONS_DIR / dataset_name
+
+
+def _latest_pointer_path(dataset_name: str) -> Path:
+    return _dataset_root(dataset_name) / "latest.json"
+
+
+def get_dataset_file_path(dataset_name: str) -> Path:
+    latest_pointer = _latest_pointer_path(dataset_name)
+    if latest_pointer.exists():
+        metadata = json.loads(latest_pointer.read_text())
+        merged_path = Path(metadata["merged_dataset_path"])
+        if merged_path.exists():
+            return merged_path
+    return TRAINING_DIR / f"{dataset_name}.csv"
+
+
+def get_dataset_version_info(dataset_name: str) -> dict[str, Any]:
+    active_path = get_dataset_file_path(dataset_name)
+    latest_pointer = _latest_pointer_path(dataset_name)
+    if latest_pointer.exists():
+        metadata = json.loads(latest_pointer.read_text())
+        metadata["active_dataset_path"] = str(active_path)
+        return metadata
+    return {
+        "dataset": dataset_name,
+        "version_id": None,
+        "active_dataset_path": str(active_path),
+        "base_dataset_path": str(TRAINING_DIR / f"{dataset_name}.csv"),
+    }
+
+
+def _validation_payload(df: pd.DataFrame, filename: str, dataset_name: str) -> dict[str, Any]:
     required_cols = sorted(DATASET_SIGNATURES[dataset_name])
-    present = set(df.columns)
-    missing_cols = [c for c in required_cols if c not in present]
+    dedup_keys = DEDUP_KEYS.get(dataset_name, [])
+    missing_cols = [c for c in required_cols if c not in df.columns]
 
     null_counts = {col: int(df[col].isna().sum()) for col in df.columns}
     preview = df.head(10).fillna("").to_dict(orient="records")
+    duplicate_rows = int(df.duplicated().sum())
+    duplicate_keys = 0
+    if dedup_keys and all(key in df.columns for key in dedup_keys):
+        duplicate_keys = int(df.duplicated(subset=dedup_keys).sum())
 
-    existing_path = TRAINING_DIR / f"{dataset_name}.csv"
+    active_path = get_dataset_file_path(dataset_name)
     existing_rows = 0
-    if existing_path.exists():
-        existing_rows = sum(1 for _ in open(existing_path)) - 1  # subtract header
+    if active_path.exists():
+        existing_rows = max(sum(1 for _ in active_path.open()) - 1, 0)
 
-    # Column-level validation info
-    col_info = []
+    column_info = []
     for col in df.columns:
-        col_info.append(
+        column_info.append(
             {
                 "name": col,
                 "required": col in DATASET_SIGNATURES[dataset_name],
                 "null_count": null_counts[col],
                 "dtype": str(df[col].dtype),
+                "example": "" if df[col].dropna().empty else str(df[col].dropna().iloc[0]),
             }
         )
 
@@ -95,56 +123,105 @@ def validate_training_csv(content: bytes, filename: str) -> dict[str, Any]:
         "missing_required_columns": missing_cols,
         "valid": len(missing_cols) == 0,
         "null_counts": null_counts,
-        "column_info": col_info,
+        "column_info": column_info,
         "preview": preview,
+        "duplicate_rows": duplicate_rows,
+        "duplicate_business_keys": duplicate_keys,
+        "dedup_keys": dedup_keys,
         "existing_rows_in_dataset": existing_rows,
+        "active_dataset_path": str(active_path),
+        "active_dataset_version": get_dataset_version_info(dataset_name),
     }
 
 
+def validate_training_csv(content: bytes, filename: str) -> dict[str, Any]:
+    df = _read_csv_bytes(content)
+    dataset_name = detect_dataset(list(df.columns))
+    if dataset_name is None:
+        raise ValueError(
+            "Cannot identify dataset from column names. Expected columns matching one of: "
+            + ", ".join(f"{k}: {sorted(v)}" for k, v in DATASET_SIGNATURES.items())
+        )
+    return _validation_payload(df, filename, dataset_name)
+
+
 def ingest_training_csv(content: bytes, filename: str) -> dict[str, Any]:
-    """Append valid rows to the training CSV and publish Kafka events."""
     validation = validate_training_csv(content, filename)
     if not validation["valid"]:
-        raise ValueError(
-            f"Missing required columns: {validation['missing_required_columns']}"
-        )
+        raise ValueError(f"Missing required columns: {validation['missing_required_columns']}")
 
     dataset_name = validation["detected_dataset"]
-    df = pd.read_csv(pd.io.common.BytesIO(content))
-
-    existing_path = TRAINING_DIR / f"{dataset_name}.csv"
+    df = _read_csv_bytes(content)
+    current_dataset_path = get_dataset_file_path(dataset_name)
     dedup_keys = DEDUP_KEYS.get(dataset_name, [])
 
-    rows_before = 0
-    if existing_path.exists():
-        existing_df = pd.read_csv(existing_path)
-        rows_before = len(existing_df)
-        if dedup_keys and all(k in df.columns and k in existing_df.columns for k in dedup_keys):
-            merged = pd.concat([existing_df, df], ignore_index=True)
-            merged = merged.drop_duplicates(subset=dedup_keys, keep="last")
-        else:
-            merged = pd.concat([existing_df, df], ignore_index=True).drop_duplicates()
+    if current_dataset_path.exists():
+        current_df = pd.read_csv(current_dataset_path)
+        rows_before = len(current_df)
     else:
-        merged = df
+        current_df = pd.DataFrame(columns=df.columns)
         rows_before = 0
 
-    merged.to_csv(existing_path, index=False)
-    rows_added = len(merged) - rows_before
+    merged = pd.concat([current_df, df], ignore_index=True)
+    if dedup_keys and all(key in merged.columns for key in dedup_keys):
+        merged = merged.drop_duplicates(subset=dedup_keys, keep="last")
+    else:
+        merged = merged.drop_duplicates()
 
-    # Publish each new row to Kafka so the consumer/Airflow can react
-    _publish_to_kafka(dataset_name, df, rows_added)
+    merged = merged.reset_index(drop=True)
+    rows_added = max(len(merged) - rows_before, 0)
+
+    version_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    version_root = _dataset_root(dataset_name) / version_id
+    version_root.mkdir(parents=True, exist_ok=True)
+
+    uploaded_copy_path = version_root / filename
+    uploaded_copy_path.write_bytes(content)
+
+    merged_dataset_path = version_root / f"{dataset_name}.csv"
+    merged.to_csv(merged_dataset_path, index=False)
+
+    metadata = {
+        "dataset": dataset_name,
+        "version_id": version_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_filename": filename,
+        "uploaded_copy_path": str(uploaded_copy_path),
+        "merged_dataset_path": str(merged_dataset_path),
+        "base_dataset_path": str(TRAINING_DIR / f"{dataset_name}.csv"),
+        "parent_dataset_path": str(current_dataset_path),
+        "rows_in_upload": int(len(df)),
+        "rows_before": int(rows_before),
+        "rows_after": int(len(merged)),
+        "rows_added": int(rows_added),
+        "dedup_keys": dedup_keys,
+    }
+    (version_root / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    _latest_pointer_path(dataset_name).parent.mkdir(parents=True, exist_ok=True)
+    _latest_pointer_path(dataset_name).write_text(json.dumps(metadata, indent=2))
+
+    _publish_to_kafka(dataset_name, df, rows_added, version_id, str(merged_dataset_path))
 
     return {
         "ok": True,
         "dataset": dataset_name,
+        "version_id": version_id,
         "rows_in_upload": int(len(df)),
-        "rows_added": rows_added,
+        "rows_added": int(rows_added),
         "total_rows_now": int(len(merged)),
         "dedup_keys_used": dedup_keys,
+        "uploaded_copy_path": str(uploaded_copy_path),
+        "merged_dataset_path": str(merged_dataset_path),
     }
 
 
-def _publish_to_kafka(dataset_name: str, df: pd.DataFrame, rows_added: int) -> None:
+def _publish_to_kafka(
+    dataset_name: str,
+    df: pd.DataFrame,
+    rows_added: int,
+    version_id: str,
+    merged_dataset_path: str,
+) -> None:
     try:
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP,
@@ -157,13 +234,19 @@ def _publish_to_kafka(dataset_name: str, df: pd.DataFrame, rows_added: int) -> N
             "event_id": str(uuid.uuid4()),
             "event_type": "ml_training_ingest",
             "dataset": dataset_name,
+            "dataset_version_id": version_id,
             "rows_added": rows_added,
+            "merged_dataset_path": merged_dataset_path,
             "sample_row": df.head(1).fillna("").to_dict(orient="records")[0] if len(df) > 0 else {},
         }
         producer.send(ML_INGEST_TOPIC, key=dataset_name, value=event)
         producer.flush()
         producer.close()
-        logger.info("Published ml_training_ingest event for dataset=%s rows_added=%d", dataset_name, rows_added)
+        logger.info(
+            "Published ml_training_ingest event for dataset=%s version=%s rows_added=%d",
+            dataset_name,
+            version_id,
+            rows_added,
+        )
     except Exception as exc:
-        # Non-fatal: CSV has already been written; log and continue
         logger.warning("Failed to publish Kafka event for ML ingest: %s", exc)

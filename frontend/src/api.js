@@ -20,8 +20,12 @@ export const getTrends = (dateFrom, dateTo) => {
   return api.get("/dashboard/trends", { params });
 };
 export const getModels = () => api.get("/ml/models");
+export const getTrainingRuns = (limit = 20) =>
+  api.get("/ml/training-runs", { params: { limit } });
 export const predictModel = (modelName, features = {}) =>
   api.post(`/ml/predict/${modelName}`, { features });
+export const retrainModel = modelName =>
+  api.post("/ml/retrain", modelName ? { model_name: modelName } : {});
 export const getCustomerFeatures = (limit = 50) =>
   api.get("/features/customer", { params: { limit } });
 export const getSellerFeatures = (limit = 50) =>

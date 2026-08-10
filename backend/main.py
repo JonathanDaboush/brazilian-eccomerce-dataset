@@ -5,6 +5,7 @@ import os
 from io import BytesIO
 from datetime import datetime
 from typing import Any
+from urllib.request import urlopen
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +15,7 @@ from sqlalchemy import text
 
 from controller.producer import publish_next_batch
 from database import engine, test_connection
-from services.ml_service import available_models, predict
+from services.ml_service import available_models, predict, recent_training_runs, retrain_all_models, retrain_model
 from services.replay_service import (
     append_log,
     build_event_bank_if_missing,
@@ -24,11 +25,12 @@ from services.replay_service import (
     get_trends,
     update_replay_state,
 )
-from services.upload_service import ingest_training_csv, validate_training_csv, DATASET_SIGNATURES
+from services.upload_service import DEDUP_KEYS, DATASET_SIGNATURES, ingest_training_csv, validate_training_csv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("olist-api")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+AIRFLOW_HEALTH_URL = os.getenv("AIRFLOW_HEALTH_URL", "http://airflow-webserver:8080/health")
 
 app = FastAPI(title="Olist Replay API", version="2.0.0")
 
@@ -50,6 +52,10 @@ class PredictRequest(BaseModel):
     features: dict[str, Any] | None = None
 
 
+class RetrainRequest(BaseModel):
+    model_name: str | None = None
+
+
 @app.on_event("startup")
 def startup() -> None:
     ensure_replay_schema()
@@ -67,7 +73,7 @@ def health_system():
         logger.warning("Database health probe failed: %s", exc.__class__.__name__)
 
     replay_state = get_replay_state()
-    airflow_state = "configured"
+    airflow_state = "Warning"
     kafka_state = "Healthy"
     try:
         probe = KafkaConsumer(
@@ -81,13 +87,34 @@ def health_system():
     except Exception:
         kafka_state = "Warning"
 
+    try:
+        with urlopen(AIRFLOW_HEALTH_URL, timeout=3) as response:
+            airflow_state = "Healthy" if response.status == 200 else "Warning"
+    except Exception:
+        airflow_state = "Warning"
+
+    latest_batch = replay_state.get("latest_batch") or {}
+    producer_state = "Healthy"
+    if latest_batch.get("producer_status") == "failed":
+        producer_state = "Failed"
+    elif replay_state["status"] == "running":
+        producer_state = "Processing"
+
+    consumer_state = "Healthy"
+    if replay_state["events_failed"] > 0:
+        consumer_state = "Warning"
+    if replay_state["status"] == "running" and replay_state["processing_rate_eps"] == 0:
+        consumer_state = "Delayed"
+
     status = "Healthy" if db_ok else "Failed"
     if replay_state["status"] in {"running"}:
         status = "Processing"
     if replay_state["status"] in {"failed"}:
         status = "Failed"
-    if kafka_state == "Warning" and status == "Healthy":
+    if any(state in {"Warning", "Delayed"} for state in (kafka_state, airflow_state, consumer_state)) and status == "Healthy":
         status = "Warning"
+    if producer_state == "Failed":
+        status = "Failed"
 
     return {
         "status": status,
@@ -96,6 +123,8 @@ def health_system():
         "database_message": "Database connectivity check passed" if db_ok else "Database connectivity check failed",
         "kafka": kafka_state,
         "airflow": airflow_state,
+        "producer": producer_state,
+        "consumer": consumer_state,
         "replay": replay_state,
         "checked_at": datetime.utcnow().isoformat(),
     }
@@ -217,12 +246,24 @@ def ml_predict(model_name: str, request: PredictRequest):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-REQUIRED_UPLOAD_COLUMNS = {
-    "delivery_delay": {"late_delivery"},
-    "order_cancellation": {"cancelled"},
-    "review_prediction": {"review_score"},
-    "demand_forecasting": {"units_sold"},
-}
+@app.post("/ml/retrain")
+def ml_retrain(request: RetrainRequest):
+    try:
+        if request.model_name:
+            return retrain_model(request.model_name)
+        return retrain_all_models()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("ML retraining failed")
+        raise HTTPException(status_code=500, detail="ML retraining failed") from exc
+
+
+@app.get("/ml/training-runs")
+def ml_training_runs(limit: int = 20):
+    return {"items": recent_training_runs(limit=limit)}
 
 
 @app.post("/excel/validate")
@@ -241,19 +282,37 @@ async def validate_excel(file: UploadFile):
         raise HTTPException(status_code=400, detail=f"Failed to parse Excel file: {exc}") from exc
 
     preview = df.head(10).fillna("").to_dict(orient="records")
-    checks = {}
-    for dataset, required_cols in REQUIRED_UPLOAD_COLUMNS.items():
-        missing = sorted(list(required_cols - set(df.columns)))
-        checks[dataset] = {"valid": len(missing) == 0, "missing_columns": missing}
+    null_counts = {col: int(val) for col, val in df.isna().sum().to_dict().items()}
+    detected_dataset = None
+    for dataset, required_cols in DATASET_SIGNATURES.items():
+        if required_cols.issubset(set(df.columns)):
+            detected_dataset = dataset
+            break
 
-    null_counts = df.isna().sum().to_dict()
+    duplicate_rows = int(df.duplicated().sum())
+    duplicate_business_keys = 0
+    required_cols = []
+    missing_columns = []
+    dedup_keys = []
+    if detected_dataset:
+        required_cols = sorted(DATASET_SIGNATURES[detected_dataset])
+        missing_columns = sorted(list(DATASET_SIGNATURES[detected_dataset] - set(df.columns)))
+        dedup_keys = DEDUP_KEYS.get(detected_dataset, [])
+        if dedup_keys and all(key in df.columns for key in dedup_keys):
+            duplicate_business_keys = int(df.duplicated(subset=dedup_keys).sum())
 
     return {
         "filename": filename,
         "rows": int(len(df)),
         "columns": list(df.columns),
+        "detected_dataset": detected_dataset,
+        "required_columns": required_cols,
+        "missing_columns": missing_columns,
+        "dedup_keys": dedup_keys,
         "null_counts": null_counts,
-        "validation": checks,
+        "duplicate_rows": duplicate_rows,
+        "duplicate_business_keys": duplicate_business_keys,
+        "column_types": {col: str(dtype) for col, dtype in df.dtypes.items()},
         "preview": preview,
     }
 

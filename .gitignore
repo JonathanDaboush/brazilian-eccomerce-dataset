@@ -35,3 +35,5 @@ tmp/
 backend/olist_saved_models/
 backend/olist_ml_training/
 backend/olist_row_usage_manifest/
+backend/model_versions/
+backend/training_dataset_versions/

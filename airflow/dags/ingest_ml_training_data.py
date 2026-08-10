@@ -106,15 +106,17 @@ def task_trigger_retrain(**context):
         print("No ML training data available – skipping retrain")
         return
 
-    # Verify models are accessible (retrain happens offline via ml_functions/retrain.py)
-    models = call_api("/ml/models").get("models", [])
-    available = [m["name"] for m in models if m.get("available")]
-    print(f"Models currently available: {available}")
-    # Future: call a dedicated /ml/retrain endpoint when one is wired up in main.py
+    result = call_api("/ml/retrain", method="POST", payload={})
+    print(f"Retrain result: {result}")
+    context["ti"].xcom_push(key="retrain_result", value=result)
 
 
 def task_verify_model_artifacts(**context):
     """Confirm at least one ML model is available after the ingest/retrain cycle."""
+    retrain_result = context["ti"].xcom_pull(key="retrain_result", task_ids="trigger_retrain") or {}
+    failed_runs = [run for run in retrain_result.get("runs", []) if not run.get("ok")]
+    if failed_runs:
+        raise RuntimeError(f"Some retraining runs failed: {failed_runs}")
     models = call_api("/ml/models").get("models", [])
     available = [m["name"] for m in models if m.get("available")]
     if not available:

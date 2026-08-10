@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import time
 from datetime import datetime
 from typing import Any
 
@@ -226,6 +225,35 @@ def get_replay_state() -> dict[str, Any]:
     failed = _exec("SELECT COUNT(*) as c FROM consumer_events_log WHERE status='failed'").first()._mapping["c"]
     total = _exec("SELECT COUNT(*) as c FROM event_bank_events").first()._mapping["c"]
 
+    recent_window = _exec(
+        """
+        SELECT
+            COUNT(*) AS processed_last_5m,
+            MIN(processed_at) AS window_start,
+            MAX(processed_at) AS window_end
+        FROM processed_events
+        WHERE processed_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+        """
+    ).mappings().first()
+    processing_rate = 0.0
+    if recent_window and recent_window["processed_last_5m"]:
+        start = recent_window["window_start"]
+        end = recent_window["window_end"]
+        if start and end and start != end:
+            processing_rate = round(
+                float(recent_window["processed_last_5m"]) / max((end - start).total_seconds(), 1.0),
+                2,
+            )
+
+    latest_batch = _exec(
+        """
+        SELECT batch_id, produced_events, requested_batch_size, replay_speed_ms, producer_status, started_at, finished_at, error_message
+        FROM replay_batches
+        ORDER BY batch_id DESC
+        LIMIT 1
+        """
+    ).mappings().first()
+
     return {
         "status": row["status"],
         "current_offset": int(row["current_offset"]),
@@ -237,6 +265,21 @@ def get_replay_state() -> dict[str, Any]:
         "events_failed": int(failed),
         "events_total": int(total),
         "events_remaining": max(int(total) - int(processed), 0),
+        "processing_rate_eps": processing_rate,
+        "latest_batch": (
+            {
+                "batch_id": int(latest_batch["batch_id"]),
+                "produced_events": int(latest_batch["produced_events"] or 0),
+                "requested_batch_size": int(latest_batch["requested_batch_size"] or 0),
+                "replay_speed_ms": int(latest_batch["replay_speed_ms"] or 0),
+                "producer_status": latest_batch["producer_status"],
+                "started_at": latest_batch["started_at"].isoformat() if latest_batch["started_at"] else None,
+                "finished_at": latest_batch["finished_at"].isoformat() if latest_batch["finished_at"] else None,
+                "error_message": latest_batch["error_message"],
+            }
+            if latest_batch
+            else None
+        ),
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
 
@@ -476,6 +519,30 @@ def _recompute_products(order_id: str):
         )
 
 
+def _event_status(event_type: str) -> str:
+    return {
+        "order_created": "created",
+        "order_payment": "paid",
+        "order_shipped": "shipped",
+        "order_delivered": "delivered",
+        "order_cancelled": "canceled",
+    }.get(event_type, "created")
+
+
+def _event_order_payload(order: dict[str, Any], event_type: str) -> dict[str, Any]:
+    status = _event_status(event_type)
+    return {
+        "order_id": order.get("order_id"),
+        "customer_id": order.get("customer_id"),
+        "order_status": status,
+        "purchase": order.get("order_purchase_timestamp"),
+        "approved": order.get("order_approved_at") if event_type in {"order_payment", "order_shipped", "order_delivered", "order_cancelled"} else None,
+        "carrier": order.get("order_delivered_carrier_date") if event_type in {"order_shipped", "order_delivered"} else None,
+        "delivered": order.get("order_delivered_customer_date") if event_type == "order_delivered" else None,
+        "estimated": order.get("order_estimated_delivery_date"),
+    }
+
+
 def process_event(event: dict[str, Any]) -> dict[str, Any]:
     ensure_replay_schema()
     event_id = event["event_id"]
@@ -490,6 +557,7 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
     order, items, payments, reviews = _load_order_context(order_id)
 
     try:
+        order_payload = _event_order_payload(order, event_type)
         _exec(
             """
             INSERT INTO replay_orders(order_id, customer_id, order_status, order_purchase_timestamp, order_approved_at,
@@ -504,16 +572,7 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
                 order_delivered_customer_date = VALUES(order_delivered_customer_date),
                 order_estimated_delivery_date = VALUES(order_estimated_delivery_date)
             """,
-            {
-                "order_id": order_id,
-                "customer_id": order.get("customer_id"),
-                "order_status": order.get("order_status", "created"),
-                "purchase": order.get("order_purchase_timestamp"),
-                "approved": order.get("order_approved_at"),
-                "carrier": order.get("order_delivered_carrier_date"),
-                "delivered": order.get("order_delivered_customer_date"),
-                "estimated": order.get("order_estimated_delivery_date"),
-            },
+            order_payload,
         )
 
         if event_type == "order_created":
@@ -558,8 +617,35 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
                     },
                 )
 
+        if event_type == "order_payment":
+            _exec(
+                """
+                UPDATE replay_orders
+                SET order_status='paid', order_approved_at=:approved
+                WHERE order_id=:order_id
+                """,
+                {"order_id": order_id, "approved": order.get("order_approved_at")},
+            )
+
+        if event_type == "order_shipped":
+            _exec(
+                """
+                UPDATE replay_orders
+                SET order_status='shipped', order_delivered_carrier_date=:carrier
+                WHERE order_id=:order_id
+                """,
+                {"order_id": order_id, "carrier": order.get("order_delivered_carrier_date")},
+            )
+
         if event_type == "order_delivered":
-            _exec("UPDATE replay_orders SET order_status='delivered' WHERE order_id=:order_id", {"order_id": order_id})
+            _exec(
+                """
+                UPDATE replay_orders
+                SET order_status='delivered', order_delivered_customer_date=:delivered
+                WHERE order_id=:order_id
+                """,
+                {"order_id": order_id, "delivered": order.get("order_delivered_customer_date")},
+            )
             for review in reviews:
                 _exec(
                     """
@@ -637,6 +723,7 @@ def get_dashboard_summary() -> dict[str, Any]:
         LIMIT 20
         """
     ).mappings().all()
+    replay = get_replay_state()
 
     return {
         "kpis": {
@@ -659,6 +746,15 @@ def get_dashboard_summary() -> dict[str, Any]:
             for row in logs
         ],
         "data_freshness": freshness["ts"].isoformat() if freshness and freshness["ts"] else None,
+        "processing_status": {
+            "replay_status": replay["status"],
+            "events_processed": replay["events_processed"],
+            "events_remaining": replay["events_remaining"],
+            "events_failed": replay["events_failed"],
+            "processing_rate_eps": replay["processing_rate_eps"],
+            "latest_batch": replay["latest_batch"],
+            "last_error": replay["last_error"],
+        },
     }
 
 
