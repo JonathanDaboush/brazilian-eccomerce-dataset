@@ -28,7 +28,6 @@ from services.replay_service import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("olist-api")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-EXPOSE_INTERNAL_ERRORS = os.getenv("EXPOSE_INTERNAL_ERRORS", "false").lower() == "true"
 
 app = FastAPI(title="Olist Replay API", version="2.0.0")
 
@@ -59,13 +58,12 @@ def startup() -> None:
 @app.get("/health/system")
 def health_system():
     db_ok = True
-    db_error = None
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:
         db_ok = False
-        db_error = str(exc)
+        logger.warning("Database health probe failed: %s", exc.__class__.__name__)
 
     replay_state = get_replay_state()
     airflow_state = "configured"
@@ -94,7 +92,7 @@ def health_system():
         "status": status,
         "api": "Healthy",
         "database": "Healthy" if db_ok else "Failed",
-        "database_error": db_error if EXPOSE_INTERNAL_ERRORS else None,
+        "database_message": "Database connectivity check passed" if db_ok else "Database connectivity check failed",
         "kafka": kafka_state,
         "airflow": airflow_state,
         "replay": replay_state,
