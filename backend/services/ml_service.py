@@ -46,6 +46,38 @@ def _training_frame(name: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _feature_schema(model_name: str) -> list[dict]:
+    """Return per-column schema for the model's feature set (excluding target)."""
+    try:
+        df = _training_frame(model_name)
+    except FileNotFoundError:
+        return []
+    target = TARGET_COLS.get(model_name)
+    schema = []
+    for col in df.columns:
+        if col == target:
+            continue
+        dtype = str(df[col].dtype)
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        sample_values: list = []
+        if not is_numeric:
+            mode_vals = df[col].dropna().unique()[:5].tolist()
+            sample_values = [str(v) for v in mode_vals]
+        schema.append(
+            {
+                "name": col,
+                "dtype": dtype,
+                "numeric": is_numeric,
+                "sample_values": sample_values,
+                "default": (
+                    float(df[col].median()) if is_numeric and not df[col].dropna().empty
+                    else (df[col].mode(dropna=True).iloc[0] if not df[col].mode(dropna=True).empty else None)
+                ),
+            }
+        )
+    return schema
+
+
 def available_models() -> list[dict[str, str | bool]]:
     out = []
     for name, filename in MODEL_FILES.items():
@@ -55,6 +87,8 @@ def available_models() -> list[dict[str, str | bool]]:
                 "model_file": filename,
                 "available": (MODELS_DIR / filename).exists(),
                 "training_data_available": (TRAINING_DIR / f"{name}.csv").exists(),
+                "feature_schema": _feature_schema(name),
+                "target_column": TARGET_COLS.get(name),
             }
         )
     return out

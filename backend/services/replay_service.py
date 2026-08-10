@@ -662,19 +662,31 @@ def get_dashboard_summary() -> dict[str, Any]:
     }
 
 
-def get_trends() -> dict[str, Any]:
+def get_trends(date_from: str | None = None, date_to: str | None = None) -> dict[str, Any]:
+    where_clauses = []
+    params: dict[str, Any] = {}
+    if date_from:
+        where_clauses.append("DATE(o.order_purchase_timestamp) >= :date_from")
+        params["date_from"] = date_from
+    if date_to:
+        where_clauses.append("DATE(o.order_purchase_timestamp) <= :date_to")
+        params["date_to"] = date_to
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
     rows = _exec(
-        """
+        f"""
         SELECT DATE(o.order_purchase_timestamp) AS day,
                COALESCE(SUM(p.payment_value), 0) AS revenue,
                SUM(CASE WHEN o.order_status = 'delivered' THEN 1 ELSE 0 END) AS delivered,
                SUM(CASE WHEN o.order_status = 'canceled' THEN 1 ELSE 0 END) AS cancelled
         FROM replay_orders o
         LEFT JOIN replay_payments p ON p.order_id = o.order_id
+        {where_sql}
         GROUP BY DATE(o.order_purchase_timestamp)
         ORDER BY day DESC
-        LIMIT 30
-        """
+        LIMIT 90
+        """,
+        params,
     ).mappings().all()
 
     data = []

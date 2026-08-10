@@ -6,7 +6,7 @@ from io import BytesIO
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from kafka import KafkaConsumer
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ from services.replay_service import (
     get_trends,
     update_replay_state,
 )
+from services.upload_service import ingest_training_csv, validate_training_csv, DATASET_SIGNATURES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("olist-api")
@@ -164,8 +165,11 @@ def dashboard_summary():
 
 
 @app.get("/dashboard/trends")
-def dashboard_trends():
-    return get_trends()
+def dashboard_trends(
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+):
+    return get_trends(date_from=date_from, date_to=date_to)
 
 
 @app.get("/features/customer")
@@ -251,4 +255,42 @@ async def validate_excel(file: UploadFile):
         "null_counts": null_counts,
         "validation": checks,
         "preview": preview,
+    }
+
+
+@app.post("/upload/validate-training-csv")
+async def validate_training_csv_endpoint(file: UploadFile):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are supported")
+    content = await file.read()
+    try:
+        result = validate_training_csv(content, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@app.post("/upload/training-csv")
+async def ingest_training_csv_endpoint(file: UploadFile):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are supported")
+    content = await file.read()
+    try:
+        result = ingest_training_csv(content, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to ingest training CSV")
+        raise HTTPException(status_code=500, detail="Ingest failed") from exc
+    return result
+
+
+@app.get("/upload/dataset-schemas")
+def dataset_schemas():
+    """Return expected column signatures for all 6 training datasets."""
+    return {
+        name: sorted(cols)
+        for name, cols in DATASET_SIGNATURES.items()
     }
