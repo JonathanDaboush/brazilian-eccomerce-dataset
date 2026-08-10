@@ -3,7 +3,35 @@ __pycache__/
 *.pyo
 .env
 .venv/
+venv/
 *.egg-info/
 dist/
 build/
+node_modules/
 .DS_Store
+
+# Logs
+*.log
+airflow/logs/
+backend/logs/
+
+# Local databases/artifacts
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / OS
+.vscode/
+.idea/
+
+# Temporary/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage/
+tmp/
+
+# Generated ML/data outputs
+backend/olist_saved_models/
+backend/olist_ml_training/
+backend/olist_row_usage_manifest/
