@@ -28,6 +28,7 @@ from services.replay_service import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("olist-api")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+EXPOSE_INTERNAL_ERRORS = os.getenv("EXPOSE_INTERNAL_ERRORS", "false").lower() == "true"
 
 app = FastAPI(title="Olist Replay API", version="2.0.0")
 
@@ -93,7 +94,7 @@ def health_system():
         "status": status,
         "api": "Healthy",
         "database": "Healthy" if db_ok else "Failed",
-        "database_error": db_error,
+        "database_error": db_error if EXPOSE_INTERNAL_ERRORS else None,
         "kafka": kafka_state,
         "airflow": airflow_state,
         "replay": replay_state,
@@ -107,7 +108,8 @@ def build_event_bank():
         result = build_event_bank_if_missing()
         return {"ok": True, **result}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Failed to build event bank")
+        raise HTTPException(status_code=500, detail="Failed to build event bank") from exc
 
 
 @app.get("/replay/status")
@@ -125,7 +127,8 @@ def replay_start(request: ReplayStartRequest):
     except Exception as exc:
         update_replay_state(status="failed", last_error=str(exc))
         append_log("failed", f"Producer failure: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Replay start failed")
+        raise HTTPException(status_code=500, detail="Replay start failed") from exc
 
 
 @app.post("/replay/pause")
