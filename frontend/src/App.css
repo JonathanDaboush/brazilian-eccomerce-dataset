@@ -462,6 +462,28 @@ tr:hover td { background: rgba(27, 92, 180, 0.04); }
 }
 .model-card.unavailable { opacity: 0.65; }
 .target-col { font-size: 0.75rem; color: var(--text-muted); }
+.metrics-preview {
+  margin: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.74rem;
+  overflow: auto;
+}
+.log-list {
+  display: grid;
+  gap: 10px;
+}
+.log-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+}
+.log-item small {
+  color: var(--text-muted);
+}
 
 /* ── Upload Page ────────────────────────────────────────────────────────── */
 .upload-page { display: grid; gap: 20px; }
@@ -628,4 +650,3 @@ tr:hover td { background: rgba(27, 92, 180, 0.04); }
   .page-body { padding: 16px; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
-

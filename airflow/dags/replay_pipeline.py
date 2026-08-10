@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from urllib.request import Request, urlopen
 
@@ -37,17 +38,28 @@ def task_publish_batch(**_):
     result = call_api("/replay/start", method="POST", payload={"batch_size": 250, "replay_speed_ms": 5})
     if not result.get("ok"):
         raise RuntimeError(f"Replay start failed: {result}")
+    return result
 
 
-def task_verify_consumer(**_):
-    result = call_api("/replay/status")
-    if result.get("events_total", 0) > 0 and result.get("events_processed", 0) == 0:
-        raise RuntimeError(f"No events processed yet: {result}")
+def task_verify_consumer(**context):
+    published = context["ti"].xcom_pull(task_ids="publish_kafka_events")
+    expected = int((published or {}).get("produced", 0))
+    baseline = int((published or {}).get("state", {}).get("events_processed", 0))
+    deadline = time.time() + 90
+    latest = call_api("/replay/status")
+    while time.time() < deadline:
+        latest = call_api("/replay/status")
+        if int(latest.get("events_processed", 0)) >= baseline + expected:
+            return latest
+        if latest.get("status") == "failed":
+            raise RuntimeError(f"Replay failed while waiting for consumer: {latest}")
+        time.sleep(5)
+    raise RuntimeError(f"Consumer did not process published events in time: {latest}")
 
 
 def task_update_metrics(**_):
     summary = call_api("/dashboard/summary")
-    if "kpis" not in summary:
+    if "kpis" not in summary or "processing_status" not in summary:
         raise RuntimeError("Missing KPI payload")
 
 

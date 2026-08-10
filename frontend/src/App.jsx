@@ -9,10 +9,12 @@ import {
   getModels,
   getReplayStatus,
   getSummary,
+  getTrainingRuns,
   getTrends,
   pauseReplay,
   predictModel,
   resetReplay,
+  retrainModel,
   startReplay,
   stopReplay,
 } from "./api";
@@ -66,11 +68,12 @@ function KpiCard({ label, value }) {
 }
 
 // ─── ML Prediction Panel ───────────────────────────────────────────────────
-function MLPanel({ models, toast }) {
+function MLPanel({ models, trainingRuns, toast, refreshData }) {
   const [predictionModel, setPredictionModel] = useState("");
   const [featureValues, setFeatureValues] = useState({});
   const [prediction, setPrediction] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [retraining, setRetraining] = useState(false);
 
   const availableModels = models.filter(m => m.available);
   const selectedModel = models.find(m => m.name === predictionModel);
@@ -112,6 +115,19 @@ function MLPanel({ models, toast }) {
     }
   };
 
+  const runRetrain = async () => {
+    setRetraining(true);
+    try {
+      await retrainModel(predictionModel);
+      await refreshData();
+      toast.success("Model retraining complete");
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Retraining failed");
+    } finally {
+      setRetraining(false);
+    }
+  };
+
   return (
     <div>
       <h2>ML Predictions</h2>
@@ -129,6 +145,9 @@ function MLPanel({ models, toast }) {
         </label>
         <button className="btn-primary" disabled={loading || !predictionModel} onClick={runPrediction}>
           {loading ? "Running…" : "Run Prediction"}
+        </button>
+        <button className="btn-secondary" disabled={retraining || !predictionModel || predictionModel === "product_recommendation"} onClick={runRetrain}>
+          {retraining ? "Retraining…" : "Retrain Model"}
         </button>
       </div>
 
@@ -188,8 +207,36 @@ function MLPanel({ models, toast }) {
                   {m.training_data_available ? "Training data ✓" : "No training data"}
                 </span>
                 {m.target_column && <span className="target-col">Target: {m.target_column}</span>}
+                {m.trained_at && <span className="target-col">Last trained: {new Date(m.trained_at).toLocaleString()}</span>}
+                {m.metrics && <pre className="metrics-preview">{JSON.stringify(m.metrics, null, 2)}</pre>}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {trainingRuns.length > 0 && (
+        <div className="card">
+          <h4>Recent Training Runs</h4>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Trained</th>
+                  <th>Metrics</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trainingRuns.map(run => (
+                  <tr key={run.artifact_path}>
+                    <td>{run.model}</td>
+                    <td>{run.trained_at ? new Date(run.trained_at).toLocaleString() : "—"}</td>
+                    <td><pre className="metrics-preview">{JSON.stringify(run.metrics || {}, null, 2)}</pre></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -206,6 +253,8 @@ function DashboardSection({ health, replay, summary, trends, batchSize, setBatch
       ["Database", health.database],
       ["Kafka", health.kafka],
       ["Airflow", health.airflow],
+      ["Producer", health.producer],
+      ["Consumer", health.consumer],
       ["Replay", formatStatusLabel(health.replay?.status)],
     ];
   }, [health]);
@@ -273,11 +322,32 @@ function DashboardSection({ health, replay, summary, trends, batchSize, setBatch
       <section className="card">
         <h2>Recent Activity</h2>
         <p><strong>Data Freshness:</strong> {summary?.data_freshness || "No processed events yet"}</p>
+        <p><strong>Processing Rate:</strong> {summary?.processing_status?.processing_rate_eps ?? 0} events/sec</p>
+        {summary?.processing_status?.last_error && <p><strong>Last Error:</strong> {summary.processing_status.last_error}</p>}
         <ul>
           {(summary?.recent_activity || []).map(row => (
             <li key={row.event_type}>{row.event_type}: {row.count_24h} events in last 24h</li>
           ))}
         </ul>
+      </section>
+
+      <section className="card">
+        <h2>Recent Processing Logs</h2>
+        {summary?.recent_logs?.length ? (
+          <div className="log-list">
+            {summary.recent_logs.map((row, index) => (
+              <div key={`${row.created_at}-${index}`} className="log-item">
+                <div>
+                  <strong>{row.event_type || "system"}</strong> · {row.status}
+                </div>
+                <div>{row.details}</div>
+                <small>{row.created_at ? new Date(row.created_at).toLocaleString() : "—"}</small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p>No consumer logs yet.</p>
+        )}
       </section>
     </>
   );
@@ -318,8 +388,11 @@ function PipelineSection({ replay, batchSize, setBatchSize, replaySpeed, setRepl
           <p><strong>Status:</strong> <span className={`badge ${statusColor(formatStatusLabel(replay?.status))}`}>{formatStatusLabel(replay?.status)}</span></p>
           <p><strong>Events Processed:</strong> {replay?.events_processed ?? 0}</p>
           <p><strong>Events Remaining:</strong> {replay?.events_remaining ?? 0}</p>
+          <p><strong>Processing Rate:</strong> {replay?.processing_rate_eps ?? 0} events/sec</p>
           <p><strong>Latest Batch:</strong> {replay?.last_batch_produced ?? 0}</p>
           <p><strong>Failures:</strong> {replay?.events_failed ?? 0}</p>
+          <p><strong>Producer Status:</strong> {replay?.latest_batch?.producer_status || "—"}</p>
+          <p><strong>Last Error:</strong> {replay?.last_error || "None"}</p>
         </div>
       </section>
 
@@ -356,6 +429,7 @@ function App() {
   const [summary, setSummary] = useState(null);
   const [trends, setTrends] = useState([]);
   const [models, setModels] = useState([]);
+  const [trainingRuns, setTrainingRuns] = useState([]);
   const [batchSize, setBatchSize] = useState(200);
   const [replaySpeed, setReplaySpeed] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -369,18 +443,20 @@ function App() {
 
   const loadDashboard = async () => {
     try {
-      const [healthRes, replayRes, summaryRes, trendsRes, modelsRes] = await Promise.all([
+      const [healthRes, replayRes, summaryRes, trendsRes, modelsRes, trainingRunsRes] = await Promise.all([
         getHealth(),
         getReplayStatus(),
         getSummary(),
         getTrends(dateFrom || undefined, dateTo || undefined),
         getModels(),
+        getTrainingRuns(),
       ]);
       setHealth(healthRes.data);
       setReplay(replayRes.data);
       setSummary(summaryRes.data);
       setTrends(trendsRes.data?.series || []);
       setModels(modelsRes.data?.models || []);
+      setTrainingRuns(trainingRunsRes.data?.items || []);
     } catch (err) {
       toast.error(err?.response?.data?.detail || err.message || "Failed to load dashboard");
     } finally {
@@ -476,7 +552,7 @@ function App() {
             />
           )}
           {page === "analytics" && <AnalyticsPage toast={toast} />}
-          {page === "ml" && <MLPanel models={models} toast={toast} />}
+          {page === "ml" && <MLPanel models={models} trainingRuns={trainingRuns} toast={toast} refreshData={loadDashboard} />}
           {page === "upload" && <UploadPage toast={toast} />}
           {page === "pipeline" && (
             <PipelineSection
@@ -496,4 +572,3 @@ function App() {
 }
 
 export default App;
-

@@ -23,6 +23,8 @@ Airflow DAG orchestrates health checks, event-bank build, replay batch publish, 
 - `/backend/services/replay_service.py` event bank, replay state, incremental feature updates
 - `/backend/services/kafka_service.py` real Kafka publishing for configurable batches
 - `/backend/controller/consumer.py` idempotent Kafka consumer loop
+- `/backend/services/upload_service.py` immutable training dataset versioning + CSV ingest metadata
+- `/backend/services/ml_service.py` model discovery, prediction, and retraining
 - `/airflow/dags/replay_pipeline.py` orchestration DAG
 - `/frontend/src/App.jsx` business dashboard and replay controls
 
@@ -37,8 +39,10 @@ Airflow DAG orchestrates health checks, event-bank build, replay batch publish, 
 1. Copy env file:
    - `cp .env.example .env`
 2. Fill `.env` values:
-   - `MYSQL_*` and `POSTGRES_*` and `AIRFLOW_*` are secrets and must not be committed
-   - `KAFKA_*` values are non-secret runtime config
+   - `MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD`, `POSTGRES_PASSWORD`, `AIRFLOW_PASSWORD` are secrets and must not be committed
+   - `MYSQL_DATABASE`, `MYSQL_HOST`, `MYSQL_PORT`, `POSTGRES_USER`, `POSTGRES_DB`, `AIRFLOW_USER`, `AIRFLOW_EMAIL` are local runtime settings
+   - `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_TOPIC`, `KAFKA_CONSUMER_GROUP` are non-secret runtime config
+   - `AIRFLOW_HEALTH_URL` is an optional non-secret backend probe URL and should point at the Airflow `/health` endpoint reachable from the backend container/process
 
 ## Start Infrastructure
 
@@ -65,6 +69,7 @@ Services:
    - `POST /replay/pause`, `POST /replay/stop`, `POST /replay/reset`
 
 Replay state is isolated from source Olist tables in replay-specific tables.
+Replay order status now progresses by event stage (`created` → `paid` → `shipped` → `delivered` / `canceled`) instead of leaking final historical state into the first replayed event.
 
 ## Dashboard and KPIs
 
@@ -89,6 +94,8 @@ Dashboard shows:
 
 - `GET /ml/models`
 - `POST /ml/predict/{model_name}`
+- `POST /ml/retrain`
+- `GET /ml/training-runs`
 
 Supported model names (if artifacts exist):
 - delivery_delay
@@ -96,13 +103,21 @@ Supported model names (if artifacts exist):
 - review_prediction
 - demand_forecasting
 - product_recommendation
+- customer_purchase_prediction
 
 ## Excel Validation API
 
 - `POST /excel/validate`
 - Accepts `.xlsx` / `.xls`
-- Returns required-column validation, null counts, and preview rows
+- Returns dataset detection, required-column validation, duplicate checks, null counts, inferred types, and preview rows
 - Original uploaded file is never modified
+
+## Versioned Training Dataset Uploads
+
+- `POST /upload/validate-training-csv` validates a candidate CSV against known ML dataset signatures
+- `POST /upload/training-csv` stores the uploaded CSV immutably under `backend/training_dataset_versions/<dataset>/<version>/`
+- Each upload also writes a merged versioned dataset snapshot without mutating the original base CSV under `backend/ml_training_data/`
+- Latest model retraining reads the newest merged dataset snapshot when one exists; otherwise it falls back to the original base dataset
 
 ## Airflow DAG
 
@@ -135,6 +150,8 @@ Implemented and connected:
 - incremental customer/seller/product feature updates
 - business dashboard APIs + frontend controls
 - Airflow orchestration DAG
+- versioned ML training dataset ingestion
+- API-triggered retraining metadata and model version snapshots
 
 Potential manual follow-up:
 - tune replay batch defaults for your machine

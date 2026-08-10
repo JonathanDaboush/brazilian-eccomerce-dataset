@@ -1,6 +1,6 @@
 from sqlalchemy import text
 from database import engine
-from quick_load import import_all_csvs
+from quick_load import load_csv_files
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 
@@ -34,7 +34,7 @@ def get_customers(i=1):
         
         if i > 0:
             print("Reloading data...")
-            import_all_csvs()
+            load_csv_files()
             return get_customers(i-1)
 
         return []
