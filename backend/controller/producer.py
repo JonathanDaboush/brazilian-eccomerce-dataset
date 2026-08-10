@@ -1,21 +1,8 @@
-from kafka import KafkaProducer
-import json
+from services.kafka_service import ReplayProducer
 
 
-
-producer = KafkaProducer(
-    bootstrap_servers="kafka:9092",
-    value_serializer=lambda x:
-        json.dumps(x).encode("utf-8")
-)
+_producer = ReplayProducer()
 
 
-
-def send_user_event(user):
-
-    producer.send(
-        "users-topic",
-        user
-    )
-
-    producer.flush()
+def publish_next_batch(batch_size: int | None = None, replay_speed_ms: int | None = None):
+    return _producer.publish_batch(batch_size=batch_size, replay_speed_ms=replay_speed_ms)
